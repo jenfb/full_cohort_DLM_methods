@@ -1,0 +1,284 @@
+---
+title: 'Distributed lag models (DLMs) for retrospective cohort data: sample code'
+author: "Jennifer F. Bobb"
+date: "2024-08-23"
+output:
+  html_document:
+    keep_md: true
+    theme: cerulean
+    code_folding: hide
+---
+
+
+
+In this file, we provide sample code to fit the subcohort and full-cohort distributed lag models (DLMs) considered in the paper 'Distributed lag models for retrospective cohort data with application to a study of built environment and body weight'. We run the models on a single generated dataset for one of the simulation scenarios considered in the paper. We focus on the main scenario considered of a linear exposure-response function at each lag (where each of the fitted models assumes a linear exposure-response function).
+
+
+```r
+library(dplyr)
+library(magrittr)
+library(tidyr)
+
+library(splines)
+library(dlnm)
+
+library(mice)
+library(miceafter)
+library(mitools)
+
+library(ggplot2)
+
+source("functions/generate_cohort_data.R")
+source("functions/fit_models.R")
+```
+
+## Models to compare
+
+We consider the same set of models as from the simulation study, with the following exceptions (to make this sample code faster to run):
+
+- for the imputation (MICE), we impute 10 rather than 25 datasets and use a maximum of 25 rather than 50 iterations for each dataset.
+- we exclude subcohort-3 to reduce the number of plots shown
+- we also include a distributed lag nonlinear model (DLNM) based on the full-cohort model with multiple imputation, to provide code for this method. This method is implemented to model the exposure-response function at each lag using natural cubic splines with 3 degrees of freedom (DF)
+
+
+```r
+impute_params <- tibble::tibble(maxit = 25, m = 10)
+model_info <- bind_rows(
+    #tibble(method = "subcohort", prior_years = 3, df_spl = NA),
+    tibble(method = "subcohort", prior_years = 6, df_spl = c(3, NA)),
+    tibble(method = "subcohort", prior_years = 10, df_spl = c(3, 6, NA)),
+    tibble(method = "subcohort", prior_years = 12, df_spl = c(3, 6, 9, NA)),
+    tibble(method = "full", df_spl = c(3, 6, 9, NA)),
+    tibble(method = "full-imp", df_spl = c(3, 6, 9, NA)),
+    tibble(method = "full-imp-DLNM", df_spl = c(3, 6, 9, NA), df_splX = 3)
+)
+```
+
+## Generate dataset from a particular simulation scenario
+
+Specify the parameters for the simulation. Here we generate data from a linear exposure-response function at each lag.
+
+
+```r
+## scenario for autocorrelation of lagged exposures
+expos_rho_sel <- 0.75
+#expos_rho_sel <- 0.97
+
+## scenario of true distributed lag coefficient function
+#DL_scen_sel <- "constant"
+DL_scen_sel <- "proximal"
+#DL_scen_sel <- "distal"
+
+## Proportion in cohort having different lengths of exposure history
+prop_subcohorts <- structure(list(n_prior_expos = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 
+11, 12), prop = c(0.17, 0.17, 0.13, 0.11, 0.09, 0.07, 0.06, 0.05, 
+0.04, 0.04, 0.04, 0.03)), row.names = c(NA, -12L), class = c("tbl_df", 
+"tbl", "data.frame"))
+
+#n_obs <- 2000
+n_obs <- 1000 ## sample size
+n_cohorts <- 12 ## maximum number of prior exposures
+
+## Distributed lag coefficient function scenarios
+cfs <- c(2, 1, 0.5, 0.25, rep(0, n_cohorts-4)) 
+DL_fun_scen <- bind_rows(
+    tibble(DL_scen = "constant", DL_coef = rep(0.3, length(cfs)) %>% list()),
+    tibble(DL_scen = "proximal", DL_coef = cfs %>% list()),
+    tibble(DL_scen = "distal",  DL_coef = rev(cfs) %>% list())
+) %>%
+    filter(DL_scen == DL_scen_sel)
+
+## all parameter values for current data generation
+params <- tibble(
+    n_obs = n_obs,
+    n_cohorts = n_cohorts,
+    expos_rho = expos_rho_sel, ## correlation of lagged exposures
+    sigsq_y_true = c(11)^2, ## residual variance in outcome generating model
+    intercept = 0, ## intercept in outcome generating model
+    expos_gen_info = tibble(expos_mean = 10, expos_SD = 8) %>% list() ## mean and SD of lagged exposures,
+) %>%
+    bind_cols(DL_fun_scen)
+```
+
+For illustration, here we generate a single dataset from one set of parameter values. To save computation time for this illustration we generate a dataset of size 1000 (in the paper we used 2000). The parameter values we use are:
+
+- We set the autocorrelation parameter for lagged exposures (rho) to be 0.75
+- We set the true distributed lag coefficient to be the 'proximal' function
+
+
+
+```r
+## Information on exposure variable names in datasets
+expos_names_prefix <- "expos" ## exposure at lag 1 will be named 'expos1', etc.
+expos_var_names <- paste0(expos_names_prefix, 1:n_cohorts)
+
+## First, generate components used in data generating models
+seed_dataset <- 123
+set.seed(seed_dataset)
+e <- params$expos_gen_info[[1]]
+df_comps <- params %$% gen_data_comps(
+    n_obs = n_obs, n_cohorts = n_cohorts, 
+    expos_mean = e$expos_mean, 
+    expos_SD = e$expos_SD, 
+    expos_rho = expos_rho_sel, 
+    prop_cohorts = prop_subcohorts$prop, 
+    sigsq_y_true = sigsq_y_true
+)
+
+## Now generate outcome data and missingness from components
+dset <- params %$% gen_data_from_comps(
+    df_comps = df_comps, DL_coef = DL_coef[[1]]
+) %>%
+    select(-eps, -mu)
+```
+
+## Impute complete exposure data for full-cohort using multiple imputation (MI)
+
+
+```r
+seed_dataset2 <- seed_dataset + 1
+
+## Uses the mice R package
+to_impute <- dset %>%
+    select(y, all_of(expos_var_names))
+
+time_imp0 <- Sys.time()
+imp <- mice(
+    to_impute, 
+    maxit = impute_params$maxit, 
+    m = impute_params$m, 
+    printFlag = FALSE, 
+    remove.collinear = FALSE ## some iterations were leading to errors in the subsequent DLM as expos12 was not being imputed due to colinearity
+)
+time_imp1 <- Sys.time()
+#difftime(time_imp1, time_imp0) %>% capture.output() %>% message()
+## took ~12.5 secs for n_obs=1000
+imputed_data <- imp
+```
+
+
+## Fit models to the simulated dataset
+
+The following code loops through all the methods to apply to the simulated dataset.
+
+
+```r
+res <- NULL
+full_time0 <- Sys.time()
+for(i in 1:nrow(model_info)) {
+    res0 <- model_info[i, ]
+    seed_iter <- seed_dataset
+    df_spl <- res0$df_spl
+    df_splX <- res0$df_splX
+    
+    if (res0$method == "subcohort") {
+        form0 <- paste0("y ~ 1") ## covariate adjustment (here no covariates)
+        prior_years_sel <- res0$prior_years ## years of prior exposures available for the subcohort
+        expos_var_names_subcohort <- expos_var_names[1:prior_years_sel]
+        dat_subcohort <- dset %>%
+            filter(n_prior_expos >= prior_years_sel) ## identify subcohort
+        
+        if (!is.na(df_spl)) { ## constrained DLM
+            fit <- fit_DLM_constrained(df_spl = df_spl, max_lag = prior_years_sel, data = dat_subcohort, expos_var_names = expos_var_names_subcohort, form0 = form0)
+        } else { ## unconstrained DLM
+            fit <- fit_unconstr_dlm(expos_var_names = expos_var_names_subcohort, data = dat_subcohort, form0 = form0)
+        }
+        
+    } else if (res0$method == "full") {
+        ## create interaction terms needed to fit full-cohort model using observed cohort data
+        dset_int_terms <- set_up_lagged_dset(dset, expos_names_prefix = expos_names_prefix)
+        
+        ## exposure variable names from interaction model
+        expos_var_names_anal <- attr(dset_int_terms, "expos_var_names_anal")
+        
+        if (!is.na(df_spl)) { ## constrained DLM
+            fit <- fit_DLM_constrained(df_spl = df_spl, max_lag = n_cohorts, data = dset_int_terms, expos_var_names = expos_var_names_anal, form0 = "y ~ cohort")
+        } else { ## unconstrained DLM
+            fit <- fit_unconstr_dlm(expos_var_names = expos_var_names_anal, data = dset_int_terms, form0 = "y ~ cohort")
+        }
+    } else if (res0$method == "full-imp") {
+        
+        if (!is.na(df_spl)) { ## constrained DLM
+            fit <- fit_DLM_constrained_MI(df_spl = df_spl, max_lag = n_cohorts, imputed_data = imputed_data, expos_var_names = expos_var_names, form0 = form0)
+        } else { ## unconstrained DLM
+            fit <- try(fit_unconstr_dlm_MI(imputed_data = imputed_data, expos_var_names = expos_var_names, form0 = form0))
+        }
+    } else if (res0$method == "full-imp-DLNM") {
+        
+        fit <- fit_DLM_constrained_MI_splX(
+            df_spl = ifelse(is.na(df_spl), n_cohorts, df_spl), ## setting the number of DF to be the number of exposures is equivalent to the constrained DLM, 
+            max_lag = n_cohorts, imputed_data = imputed_data, expos_var_names = expos_var_names, form0 = form0, df_splX = df_splX)
+    }
+    
+    ## Add 95% Wald CI
+    fit_addci <- fit %>% 
+        mutate(lb = Estimate - 1.96*SE,
+               ub = Estimate + 1.96*SE)
+    
+    ## Store lag-specific and cumulative estimates
+    res_iter <- res0 %>% 
+        mutate(seed_iter = seed_iter,
+               lag_ests = list(fit_addci %>% filter(!is.na(lag))),
+               cum_est = list(fit_addci %>% filter(is.na(lag))))
+    res %<>% bind_rows(res_iter)
+
+}
+full_time1 <- Sys.time()
+#difftime(full_time1, full_time0) ## 1.2 secs to run all the methods
+
+## Add method names to use for plotting
+res_all <- res %>%
+    mutate(
+        method_base = ifelse(!is.na(prior_years), paste0(method, prior_years), method),
+        method_base_fac = factor(method_base, levels = unique(method_base))
+    ) %>%
+    mutate(
+        df_spl = as.factor(ifelse(is.na(df_spl), "NA", df_spl)) ## edit levels for plotting purposes
+    )
+```
+
+## Parameter estimates across models
+
+In the figures below, the subcohort models include individuals with at least 6, 10, or all 12 years of exposure history. Full-cohort models use observed data ("full") or imputed data ("full-imp"). Based on the results presented in the paper, the "full" method is not recommended for use due to its poor performance (e.g., bias in estimating the true DLM coefficient function). The parameter `df_spl` corresponds to the number of degrees of freedom (DF) of the lag function; a value of "NA" corresponds to the unconstrained DLM.
+
+### Lag-specific estimates
+
+```r
+lag_ests_true <- tibble(lag = 1:n_cohorts, beta_true = params$DL_coef[[1]])
+
+lag_ests <- res_all %>% 
+    unnest(lag_ests) %>% 
+    left_join(lag_ests_true, by = "lag")
+
+lag_ests %>% 
+    ggplot(aes(lag, Estimate, ymin = lb, ymax = ub)) +
+    geom_line(aes(lag, beta_true), col = "black", lwd = 0.7) +
+    geom_pointrange(aes(shape = df_spl, col = df_spl), position = position_dodge(width = 0.5), cex = 0.3) +
+    facet_wrap(~ method_base_fac, labeller = labeller(.cols = label_parsed, .multi_line = FALSE)) +
+    theme_bw() +
+    xlab("Lag") + ylab("Estimate") +
+    scale_x_continuous(breaks = (c(2,4,6,8,10,12)))
+```
+
+![](README_files/figure-html/unnamed-chunk-7-1.png)<!-- -->
+
+### Cumulative estimates
+
+```r
+cum_ests_true <- sum(params$DL_coef[[1]])
+
+cum_ests <- res_all %>% 
+    unnest(cum_est)
+
+cum_ests %>% 
+    ggplot(aes(method_base_fac, Estimate, ymin = lb, ymax = ub)) +
+    geom_pointrange(aes(shape = df_spl, col = df_spl), position = position_dodge(width = 0.5), cex = 0.3) +
+    geom_hline(yintercept = cum_ests_true, linetype = 2, col = "black") +
+    theme_bw() +
+    xlab("Method") + ylab("Estimate")
+```
+
+![](README_files/figure-html/unnamed-chunk-8-1.png)<!-- -->
+
+
+
