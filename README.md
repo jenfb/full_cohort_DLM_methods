@@ -11,7 +11,7 @@ output:
 
 
 
-In this file, we provide sample code to fit the subcohort and full-cohort distributed lag models (DLMs) considered in the paper 'Distributed lag models for retrospective cohort data with application to a study of built environment and body weight'. We run the models on a single generated dataset for one of the simulation scenarios considered in the paper. We focus on the main scenario considered of a linear exposure-response function at each lag (where each of the fitted models assumes a linear exposure-response function).
+In this file, we provide sample code to fit the subcohort and full-cohort distributed lag models (DLMs) considered in the paper 'Distributed lag models for retrospective cohort data with application to a study of built environment and body weight'. We run the models on a single generated dataset for one of the simulation scenarios considered in the paper. We focus on the main scenario considered of a linear exposure-response function at each lag. Each of the fitted models assumes a linear exposure-response function across all lags, except we also include a one model that allows for a nonlinear exposure-response function (referred to as a distributed lag nonlinear model [DLNM]) to illustrate code for this method.
 
 
 ```r
@@ -34,11 +34,11 @@ source("functions/fit_models.R")
 
 ## Models to compare
 
-We consider the same set of models as from the simulation study, with the following exceptions (to make this sample code faster to run):
+We consider the same set of models as from the simulation study, with the following modifications:
 
-- for the imputation (MICE), we impute 10 rather than 25 datasets and use a maximum of 25 rather than 50 iterations for each dataset.
+- for the multiple imputation with chained equations (MICE) procedure, we impute 10 rather than 25 datasets and use a maximum of 25 rather than 50 iterations (cycles) for each dataset, to make this sample code easier to run
 - we exclude subcohort-3 to reduce the number of plots shown
-- we also include a distributed lag nonlinear model (DLNM) based on the full-cohort model with multiple imputation, to provide code for this method. This method is implemented to model the exposure-response function at each lag using natural cubic splines with 3 degrees of freedom (DF)
+- we also include a distributed lag nonlinear model (DLNM) based on the full-cohort model with multiple imputation, to provide code for this method. This method is implemented to model the exposure-response function at each lag using natural cubic splines with 3 degrees of freedom (DF, referred to as `df_splX` in the code)
 
 
 ```r
