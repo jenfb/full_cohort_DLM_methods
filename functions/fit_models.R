@@ -169,6 +169,10 @@ fit_DLM_constrained_MI <- function(df_spl, max_lag, imputed_data, expos_var_name
     fit
 }
 
+## Fit constrained DLM with nonlinear exposure-response function at each lag, using the `dlnm` R package and combine across multiply-imputed datasets
+## In this code, the exposure-response function is modeled using natural cubic splines with degrees of freedom given by `df_splX`
+    ## To estimate lagged and cumulative effects, this code compares all exposures when their value is equal to 1 versus when their value is equal to 0
+    ## to use different values instead of 0 and 1, either the function can be modified, or the exposures can all be transformed (centered and scaled) so that 0 corresponds to a different value (e.g., 25th percentile) and 1 corresponds to a second value (e.g., 75th percentile)
 fit_DLM_constrained_MI_splX <- function(df_spl, max_lag, imputed_data, expos_var_names, form0, df_splX = 3, cen = 0) {
 
     comp <- complete(imputed_data)
